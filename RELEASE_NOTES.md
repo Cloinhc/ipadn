@@ -1,36 +1,78 @@
-## iPadn 2.2.1
+## iPadn 2.3.1
 
-本次版本重点修复开启「专业模式」时白屏与无法重进设置页、搜索结果偶现重复条目、「Wi‑Fi 传输」大包 30 秒断流等体验问题，并同步完成全仓导航栈、外部链接确认、磁盘空间清理与 `FairPlayCore` 流式解密边界安全加固。安装包未签名，请用自己的工具签名后安装。
+**目录 / Contents**：[简体中文](#-核心修复与优化) · [TestFlight 说明与免责](#-testflight-实验性说明与免责声明) · [English](#english) · [TestFlight Notice](#testflight-experimental-notice--disclaimer)
 
-### 修复与稳定性提升
+本次为 **v2.3.0** 的首个快速修复与性能优化版：全面恢复 **iOS / iPadOS 16** 兼容运行，彻底解决快速滑动已缓存及未缓存「历史版本」长列表时的掉帧卡顿，新增跨区下载失败（`2059` / `1010`）后的智能原因提示与一键切换账号重试，并补齐 Xcode / TestFlight CI 编译与初始化稳定性。安装包均未签名，请使用自用签名工具签名后安装。
 
-- **修复专业模式白屏与子页面导航**：将底部标签切换统一绑定到语义化 `TabID`，修复开启或关闭「专业模式」时标签数组变化引发的白屏、设置页失联及退出专业模式时的导航监听循环；将「账号」与「应用包」导航栈升级为异构 `NavigationPath`，确保「本机应用 › 应用详情」、「历史版本来源」编辑页、「安装包信息」与「浏览安装包内容」深层进退稳定可靠。
-- **修复搜索偶现重复应用与下架状态串染**：对单区/多区商店搜索、本地索引与「更多结果」执行 `trackId` 及 `bundleID` 双重保序去重，合并最完整图标与体积元数据；防止本地旧缓存的已下架标记覆盖实时重新上架结果，并兼容 Apple Arcade 与 tvOS 实体核验。
-- **修复「Wi‑Fi 传输」满 30 秒断连**：将 30 秒连接超时严格限制在 HTTP 请求头读取阶段，进入安装包流式传输后立即解除计时，避免大体积 IPA 局域网下载中途断流。
-- **修复弹窗吞没、空间残留与边界崩溃**：修复「下载 › + › 通过链接下载」及备份/证书选择器收起动画期间吞没后续弹窗的问题；删除下载任务与启动时自动清理 `tmp/Share` 硬链接及残留临时导出文件，释放磁盘空间；修复灵动岛倒计时跨零崩溃、「应用包」页文件变动强制解包、备份导入覆盖商店地区竞态、无锁屏密码设备导入备份锁死、冷启动误触发自动解密、Mac `.pkg` 过期签名链接重试及根页面顶栏标题过渡。
+### 🔧 核心修复与优化
 
-### 安全与本机解密加固
+- **恢复 iOS / iPadOS 16 完整兼容（感谢 [@tageniu](https://github.com/tageniu) 在 PR #108 的贡献）**
+  - 修复 `v2.3.0` 构建时将部署目标升至 iOS 17 导致 iOS 16 设备冷启动即因 `dyld` 缺失 `Symbols.framework` 闪退的问题：统一把 SwiftPM、`xtool` 与 Xcode 的最低部署目标恢复为 **iOS 16.0**，并对 `Symbols`、`Translation`、`ActivityKit` 保持弱链接（`LC_LOAD_WEAK_DYLIB`）与完整运行时可用性防护。
+  - 修复 iOS 16 设备本地生成安装 PKCS#12 证书时 `SecItemImport` 因默认 AES 算法不兼容导致的失败：iOS 16 上自动回退为兼容的 HMAC-SHA1 PKCS#12 MAC。
+  - 补齐 Xcode 工程文件缺失的 `SigningCapability.swift` 引用，并修复 `iPadnLiveActivity` 扩展在 iOS 16 与双构建链（Xcode / `xtool`）下的可用性标注与编译通过。
+- **显著优化「历史版本」快速滚动流畅度（已缓存与未缓存长列表均实测通过）**
+  - 引入独立无锁内存缩略图缓存 `VersionIconCache`（`NSCache` 24 MiB 配额、去重并发与后台预解码）：已缓存版本图标在回滑时首帧同步直出，无闪烁占位。
+  - 将远程 IPA Range 请求由逐字节 async 迭代改写为分块 `URLSessionDataDelegate` 传输、修复快速取消时的 `CheckedContinuation` 竞争死锁，并在 `RemoteZip` 中按条目字节前缀过滤，避免大型游戏数万条中央目录反复分配；元数据获取与磁盘落盘彻底移出主线程。
+  - 消除详情页垂直嵌套 `LazyVStack` 与滚动期状态重算（改为单层扁平 `LazyVStack` 并隔离标题栏滚动观察与 `NoticeCenter` 通知中心），解决高速滑动概率性白屏、卡死；同时修复 Range/ZIP 临时失败误将版本图标缓存标为永久缺失的问题并自动自愈旧缓存。
+  - 优化账号切换体验：隔离「账号」页列表重绘、防抖后台同步并消除点按头像闪烁；顶部「已切换到…」浮动提示改用独立 `NoticeCenter` 与硬件解析圆角阴影，在连续切号时保持 120Hz 顺滑过渡。
+- **跨区下载失败智能诊断与一键切换账号（错误码 `2059` / `1010`）**
+  - 仅在 Apple 实际返回「暂时无法下载」（`2059` / `1010`）错误后触发地区核验，**绝不预先拦截仍可跨区下载的应用**；当当前 Apple 账号商店区与搜索地区不一致或应用在账号地区不可用时，给出精简明确的地区差异提示。
+  - 若本地已登录与目标搜索地区匹配的账号，弹窗直接提供 **「切换并重试」** 按钮；否则提供 **「切换账号」** 一键直达账号页。
+- **TestFlight / CI 初始化稳定性加固**
+  - 适当放宽首次冷启动 `SAPSigner`（WebKit）初始化超时上限（45s–90s 可自适应），提升低速环境中 TestFlight 会话签名与 CI 测试稳定性。
 
-- **`FairPlayCore` 流式解密与 64 位边界校验**：将加密段解密升级为 4 MB 页对齐流式窗口，超大二进制解密堆内存峰值降至固定 8 MB；补齐 Mach-O 加载命令 64 位无溢出边界、4 字节对齐、`O_NOFOLLOW`、`FAT_64`/`ZIP64` 偏移及截断压缩流防护，并将文件日志写入改为可捕获 Swift `FileHandle` 接口以防空间不足时异常闪退。
-- **归档路径包含与外部链接确认**：严格拦截畸形归档多斜杠（`///..`）路径穿越、越界相对符号链接及 `Manifest.plist` `SinfPaths` 越界复制；外部 `ipadn://` 下载链接新增来源域名与完整地址确认弹窗、应用锁状态暂存及本机回环地址拦截，且外部直链安装包下载完成后不静默触发自动安装；开启应用锁时执行「恢复默认设置」需先验证身份。
-- **诊断文案免误杀与 11 语言同步**：优化解密失败映射与脱敏规则，识别 `EACCES`/`EPERM` 授权错误并完整保留中文排障指引，同步更新全部 11 种界面语言。
-- 继续支持 iOS / iPadOS 16 及更新版本（各功能保留各自系统版本要求）。
+---
 
-### 两个安装包
+### 📢 官方频道与反馈说明
 
-- `iPadn-2.2.1-unsigned.ipa`：标准版，含实时活动（灵动岛、锁屏进度）与桌面小组件扩展，签名需要 2 个 App ID。
-- `iPadn-2.2.1-lite-unsigned.ipa`：精简版，移除扩展，只需 1 个 App ID；不提供实时活动或小组件，其他功能完全一致。
+- **官方 Telegram 频道**：👉 [**https://t.me/ipadn_official**](https://t.me/ipadn_official)
+- **GitHub Issues 仅保留只读归档**：新版安装包与源码优先在官方 Telegram 频道发布；使用问题、排障与 Bug 反馈请直接前往频道**对应版本贴文评论区**提交。
+
+### ⚠️ TestFlight 实验性说明与免责声明
+
+- **实验性功能提醒**：TestFlight 下载与原生安装为 `v2.3.x` 系列推出的**实验性功能**，受 Apple 服务端策略、账号当前有效 Beta 资格、本地网络/代理与本机配对影响，建议先使用备用 Apple 账号体验，勿分享配对文件、令牌或完整备份；详细用法与排障指南见 [README — TestFlight 实验性新功能](README.md#testflight-实验性新功能)。
+- **免责声明**：iPadn 基于 [GPL-2.0-or-later](LICENSE) 开源，仅限个人合法备份、授权测试与技术研究，与 Apple Inc. 无关；因使用本工具带来的账号风控或数据风险由使用者自行承担。
+
+### 📦 安装包与签名源
+
+- `iPadn-2.3.1-unsigned.ipa`：标准版，含实时活动（灵动岛、锁屏进度）与桌面小组件扩展，签名需要 2 个 App ID。
+- `iPadn-2.3.1-lite-unsigned.ipa`：精简版，移除扩展，只需 1 个 App ID；不提供实时活动或小组件，其他功能完全一致。
 - SideStore、AltStore、Feather 等签名工具可添加源：`https://raw.githubusercontent.com/mengangs/ipadn/main/altstore-source.json`。
+
+---
 
 ### English
 
-This release fixes a Pro mode white-screen / Settings navigation regression, intermittent duplicate search results, and a 30-second Wi‑Fi transfer cutoff on large IPAs, alongside comprehensive navigation, storage, external URL, and `FairPlayCore` streaming security hardening.
+**v2.3.1** is a fast-follow stability and performance update to **v2.3.0**: it restores full **iOS / iPadOS 16** compatibility, eliminates frame drops during fast scrolling in both cached and uncached version history lists, adds post-failure cross-region download diagnosis (`2059` / `1010`) with one-tap account switching, and resolves Xcode / TestFlight CI build and cold-boot reliability issues. Both packages are unsigned—sign with your own tool before installing.
 
-- **Pro mode & deep navigation fixes**: Binds root tab selection to semantic `TabID` values and upgrades the Account and Packages stacks to heterogeneous `NavigationPath`, resolving white screens when toggling Pro mode, preserving Settings re-entry without `onChange` loops, and keeping Installed Apps › App Detail, Version Source Editor, Package Info, and Package Contents sub-routes working reliably.
-- **Search deduplication & delisted accuracy**: Deduplicates single-region, multi-region, local-index, and More Results entries by both `trackId` and normalized `bundleID` while merging richer artwork/version metadata and preventing stale cached delisted flags from overriding live storefront listings.
-- **Wi‑Fi transfer & lifecycle reliability**: Cancels the 30-second header timeout as soon as HTTP headers arrive so large IPA browser downloads never drop mid-stream; defers stacked alerts/sheets until dismissal completes; sweeps `tmp/Share` APFS hard links on job deletion and launch; fixes Live Activity zero-crossing ranges, backup storefront/passcode-less edge cases, cold-launch auto-decrypt seeding, Mac `.pkg` retry URL refresh, and Liquid Glass root header transitions.
-- **Security & FairPlay streaming hardening**: Switches `FairPlayCore` slice decryption to 4 MB page-aligned streaming windows (`8 MB` peak heap), hardens 64-bit Mach-O / `FAT_64` / `ZIP64` / truncated-deflate bounds and throwing `FileHandle` writes, blocks `///..` multi-slash Zip-Slip and out-of-bundle `SinfPaths` / symlinks, gates external `ipadn://` download links behind user confirmation (deferring while App Lock is active and never auto-installing untrusted URLs), and preserves localized `EACCES`/`EPERM` guidance across all 11 languages.
+#### Fixes & Improvements Since v2.3.0
 
-Both packages are unsigned: the standard build includes Live Activities/widgets and needs two App IDs; lite removes the extension and needs one. Sign with your own tool before installing.
+- **Restored iOS / iPadOS 16 Support (thanks [@tageniu](https://github.com/tageniu) for PR #108)**
+  - Fixed the `v2.3.0` startup `dyld` crash on iOS 16 devices caused by an accidental iOS 17 minimum deployment target (`Symbols.framework` missing): lowered SwiftPM, `xtool`, and Xcode targets back to **iOS 16.0** while keeping `Symbols`, `Translation`, and `ActivityKit` weak-linked (`LC_LOAD_WEAK_DYLIB`) with proper availability guards.
+  - Fixed local PKCS#12 certificate import failure on iOS 16 by falling back to HMAC-SHA1 MAC when AES-based `SecItemImport` defaults are unsupported.
+  - Added the missing `SigningCapability.swift` reference to `iPadn.xcodeproj` and fixed `iPadnLiveActivity` availability annotations so both Xcode and `xtool` compile cleanly.
+- **Smooth Fast Scrolling in App Version History**
+  - Extracted a lock-free `VersionIconCache` (`NSCache` with a 24 MiB budget, in-flight request deduplication, and background `byPreparingThumbnail` decoding): previously loaded version icons now render synchronously on frame zero when scrolling back, eliminating flicker.
+  - Flattened `AppDetailView` into a single `LazyVStack` with isolated header scroll observation and `NoticeCenter`, rewrote remote IPA range reads onto chunked `URLSessionDataDelegate` transfers, prevented transient `RemoteZip` failures from poisoning cached version icons (with automatic self-healing), and eliminated account-switch avatar flicker and top-banner animation jank.
+- **TestFlight & CI Cold-Boot Reliability**
+  - Expanded the `SAPSigner` WebKit warm-up timeout floor/cap (45s–90s) to prevent spurious cold-boot timeouts under slow hosts or constrained CI runners.
+- **Post-Failure Cross-Region Download Diagnosis & One-Tap Account Switch (`2059` / `1010`)**
+  - Runs storefront diagnostics **only after** Apple returns a download failure (`2059` / `1010`)—never pre-blocking cross-region downloads that succeed—to display a concise reason when the signed-in Apple Account’s storefront differs from the selected search storefront or lacks the item.
+  - When another signed-in account matches the search storefront, the alert offers a crisp **Switch & Retry** button; otherwise it offers **Switch Account**.
+- **Single Flat `LazyVStack`, Deadlock Fix & Smooth Account Switching**
+  - Flattened `AppDetailView` into a single `LazyVStack`, eliminated the `HTTPClient` range cancellation race, filtered `RemoteZip` central directory scans to top-level payload metadata, isolated `AccountsView` & `NoticeCenter`, removed redundant top banners while switching inside the Accounts tab, and switched floating notices to a lightweight elevated capsule to avoid iOS 26/27 `SDFLayer` contention.
 
-更早版本的更新内容见 [Releases](https://github.com/mengangs/ipadn/releases)。
+#### Official Telegram Channel & GitHub Issues Archive
+- **Official Telegram Channel**: [**https://t.me/ipadn_official**](https://t.me/ipadn_official) (new builds & source archives land here first).
+- **GitHub Issues Read-Only**: Please post support questions, TestFlight diagnostics, and bug reports under the matching release post in our Telegram channel.
+
+#### TestFlight Experimental Notice & Disclaimer
+- TestFlight download and native installation in `v2.3.x` are **experimental** and depend on Apple server behavior, active per-account invitations, proxy/DNS setup, and device pairing state. Testing with a secondary Apple Account first is recommended, and never share pairing files, tokens, or unencrypted backups (see [README_EN — TestFlight Experimental](README_EN.md#testflight-experimental)).
+- Released under [GPL-2.0-or-later](LICENSE) for authorized personal testing, backups, and research; unaffiliated with Apple Inc., with all account or data risks assumed by the user.
+
+#### Packages
+- `iPadn-2.3.1-unsigned.ipa`: Standard build with Live Activities & Widgets (requires 2 App IDs).
+- `iPadn-2.3.1-lite-unsigned.ipa`: Lite build without extensions (requires 1 App ID; identical core features).
+- AltStore / SideStore / Feather repo: `https://raw.githubusercontent.com/mengangs/ipadn/main/altstore-source.json`.
+
+更早版本的更新内容（含 v2.3.0 TestFlight 完整说明）见 [Releases](https://github.com/mengangs/ipadn/releases)。

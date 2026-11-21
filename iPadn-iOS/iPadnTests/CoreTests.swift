@@ -234,6 +234,26 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(AppUpdateService.trollStoreURL(for: release)?.scheme, "apple-magnifier")
         // The test host was not installed by TrollStore, so its button stays hidden.
         XCTAssertFalse(AppUpdateService.installedByTrollStore)
+
+        // When GitHub lists `-lite-unsigned.ipa` alphabetically before `-unsigned.ipa`,
+        // `package` must still resolve to Standard while `litePackage` captures Lite.
+        let dualJSON = ###"{"tag_name":"v2.2.1","html_url":"https://github.com/mengangs/ipadn/releases/tag/v2.2.1","draft":false,"prerelease":false,"published_at":"2026-11-18T10:00:00Z","body":"## iPadn 2.2.1\n- Fix","assets":[{"name":"build-info.json","browser_download_url":"https://github.com/mengangs/ipadn/releases/download/v2.2.1/build-info.json","size":240},{"name":"iPadn-2.2.1-lite-unsigned.ipa","browser_download_url":"https://github.com/mengangs/ipadn/releases/download/v2.2.1/iPadn-2.2.1-lite-unsigned.ipa","size":49800000},{"name":"iPadn-2.2.1-lite-unsigned.ipa.sha256","browser_download_url":"https://github.com/x-lite.sha256","size":95},{"name":"iPadn-2.2.1-unsigned.ipa","browser_download_url":"https://github.com/mengangs/ipadn/releases/download/v2.2.1/iPadn-2.2.1-unsigned.ipa","size":50742804}]}"###
+        let dual = try XCTUnwrap(AppUpdateService.parse(Data(dualJSON.utf8)))
+        XCTAssertTrue(dual.hasBothVariants)
+        XCTAssertEqual(dual.package?.lastPathComponent, "iPadn-2.2.1-unsigned.ipa")
+        XCTAssertEqual(dual.packageSize, 50_742_804)
+        XCTAssertEqual(dual.litePackage?.lastPathComponent, "iPadn-2.2.1-lite-unsigned.ipa")
+        XCTAssertEqual(dual.litePackageSize, 49_800_000)
+        XCTAssertEqual(AppUpdateService.defaultVariant(for: dual, preferred: .standard), .standard)
+        XCTAssertEqual(AppUpdateService.defaultVariant(for: dual, preferred: .lite), .lite)
+        XCTAssertEqual(AppUpdateService.packageFile(for: dual, variant: .standard).lastPathComponent, "iPadn-2.2.1.ipa")
+        XCTAssertEqual(AppUpdateService.packageFile(for: dual, variant: .lite).lastPathComponent, "iPadn-2.2.1-lite.ipa")
+        for variant in [AppRelease.Variant.standard, .lite] {
+            let updateURL = try XCTUnwrap(AppUpdateService.trollStoreURL(for: dual, variant: variant))
+            let components = try XCTUnwrap(URLComponents(url: updateURL, resolvingAgainstBaseURL: false))
+            let expected = try XCTUnwrap(variant == .standard ? dual.package : dual.litePackage)
+            XCTAssertEqual(components.queryItems, [URLQueryItem(name: "url", value: expected.absoluteString)])
+        }
     }
 
     func testReleaseNotesBecomeBlocksWithoutTheVersionTitle() {
@@ -343,6 +363,19 @@ final class CoreTests: XCTestCase {
         let searchError = AppErrorMessage.forSearch(ToolError.message("Your password has changed.(2002)"))
         XCTAssertTrue(searchError.contains("重新登录"))
         XCTAssertFalse(searchError.contains("2002"))
+        let mismatch = AppleStorefrontDownloadError(
+            reason: .accountRegionMismatch(accountRegion: "US", storeRegion: "CN"),
+            targetCountry: "CN"
+        )
+        let prevLocale = AppText.locale
+        defer { AppText.locale = prevLocale }
+        AppText.locale = Locale(identifier: "zh-Hans")
+        let mismatchZh = mismatch.localizedDescription
+        XCTAssertTrue(mismatchZh.contains("美国") || mismatchZh.contains("US"))
+        XCTAssertTrue(mismatchZh.contains("中国") || mismatchZh.contains("CN"))
+        AppText.locale = Locale(identifier: "en")
+        let mismatchEn = mismatch.localizedDescription
+        XCTAssertTrue(mismatchEn.lowercased().contains("region"))
     }
 
     func testTvOSDownloadPreservesAndRestoresArtwork() {
@@ -2031,6 +2064,30 @@ final class CoreTests: XCTestCase {
         try FileManager.default.removeItem(at: fileURL)
         let evicted = try await store.load(fileKey, requiringIcon: true) { missing }
         XCTAssertEqual(evicted.iconAvailable, false, "Evicted files must be rechecked, not shown as available")
+
+        // Unverified missing-icon entries (failed before reading Info.plist, leaving both
+        // released and buildVersion nil) must self-heal when an icon is requested.
+        let poisonedKey = key + "-poisoned"
+        let poisoned = VersionMetadata(version: "21.45.4", released: nil, packageSize: 275_263_421,
+                                       iconAvailable: false, ticketChecked: true,
+                                       metadataSchema: VersionMetadata.currentSchema,
+                                       bundleShortVersion: "21.45.4", buildVersion: nil)
+        _ = try await store.load(poisonedKey, requiringPackageSize: true, requiringIcon: false) { poisoned }
+        let healedCalls = LockedCount()
+        let healedMeta = VersionMetadata(version: "21.45.4", released: Date(timeIntervalSince1970: 1_714_694_400),
+                                         packageSize: 275_263_421, iconAvailable: false, ticketChecked: true,
+                                         metadataSchema: VersionMetadata.currentSchema,
+                                         bundleShortVersion: "21.45.4", buildVersion: "21.45.4")
+        let healed = try await store.load(poisonedKey, requiringPackageSize: true, requiringIcon: true) {
+            healedCalls.increment()
+            return healedMeta
+        }
+        XCTAssertEqual(healedCalls.value, 1, "Unverified missing-icon cache entries must retry once")
+        XCTAssertEqual(healed.buildVersion, "21.45.4")
+        let settledHit = try await store.load(poisonedKey, requiringPackageSize: true, requiringIcon: true) {
+            throw RemoteZip.Failure.unreadable
+        }
+        XCTAssertEqual(settledHit.buildVersion, "21.45.4", "Verified missing-icon entries with Info.plist metadata stay cached")
     }
 
     func testVersionMetadataSizeCacheMigration() async throws {
